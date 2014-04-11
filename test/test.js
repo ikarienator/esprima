@@ -22530,6 +22530,45 @@ var testFixture = {
             }
         ],
 
+        '"use \\\nstrict";': [
+            {
+                "type": "String",
+                "value": "\"use \\\nstrict\"",
+                "range": [
+                    0,
+                    14
+                ],
+                "loc": {
+                    "start": {
+                        "line": 1,
+                        "column": 0
+                    },
+                    "end": {
+                        "line": 2,
+                        "column": 7
+                    }
+                }
+            },
+            {
+                "type": "Punctuator",
+                "value": ";",
+                "range": [
+                    14,
+                    15
+                ],
+                "loc": {
+                    "start": {
+                        "line": 2,
+                        "column": 7
+                    },
+                    "end": {
+                        "line": 2,
+                        "column": 8
+                    }
+                }
+            }
+        ],
+
         '[a] / b': [
             {
                 "type": "Punctuator",

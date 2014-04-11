@@ -344,21 +344,23 @@ parseStatement: true, parseSourceElement: true */
         }
     }
 
+    function moveToLookaheadStart() {
+        index = lookahead.start;
+        if (lookahead.type === Token.StringLiteral) {
+            lineNumber = lookahead.startLineNumber;
+            lineStart = lookahead.startLineStart;
+        } else {
+            lineNumber = lookahead.lineNumber;
+            lineStart = lookahead.lineStart;
+        }
+    }
+
     // 7.4 Comments
 
     function addComment(type, value, start, end, loc) {
-        var comment, attacher;
+        var comment;
 
         assert(typeof start === 'number', 'Comment must have valid position');
-
-        // Because the way the actual token is scanned, often the comments
-        // (if any) are skipped twice during the lexical analysis.
-        // Thus, we need to skip adding a comment if the comment array already
-        // handled it.
-        if (state.lastCommentStart >= start) {
-            return;
-        }
-        state.lastCommentStart = start;
 
         comment = {
             type: type,
@@ -380,13 +382,16 @@ parseStatement: true, parseSourceElement: true */
     function skipSingleLineComment(offset) {
         var start, loc, ch, comment;
 
-        start = index - offset;
+        state.hasLineTerminator = true;
+        start = index;
         loc = {
             start: {
                 line: lineNumber,
-                column: index - lineStart - offset
+                column: index - lineStart
             }
         };
+
+        index += offset;
 
         while (index < length) {
             ch = source.charCodeAt(index);
@@ -423,18 +428,21 @@ parseStatement: true, parseSourceElement: true */
         var start, loc, ch, comment;
 
         if (extra.comments) {
-            start = index - 2;
+            start = index;
             loc = {
                 start: {
                     line: lineNumber,
-                    column: index - lineStart - 2
+                    column: index - lineStart
                 }
             };
         }
 
+        index += 2;
+
         while (index < length) {
             ch = source.charCodeAt(index);
             if (isLineTerminator(ch)) {
+                state.hasLineTerminator = true;
                 if (ch === 0x0D && source.charCodeAt(index + 1) === 0x0A) {
                     ++index;
                 }
@@ -472,12 +480,14 @@ parseStatement: true, parseSourceElement: true */
         var ch, start;
 
         start = (index === 0);
+        state.hasLineTerminator = false;
         while (index < length) {
             ch = source.charCodeAt(index);
 
             if (isWhiteSpace(ch)) {
                 ++index;
             } else if (isLineTerminator(ch)) {
+                state.hasLineTerminator = true;
                 ++index;
                 if (ch === 0x0D && source.charCodeAt(index) === 0x0A) {
                     ++index;
@@ -488,13 +498,9 @@ parseStatement: true, parseSourceElement: true */
             } else if (ch === 0x2F) { // U+002F is '/'
                 ch = source.charCodeAt(index + 1);
                 if (ch === 0x2F) {
-                    ++index;
-                    ++index;
                     skipSingleLineComment(2);
                     start = true;
                 } else if (ch === 0x2A) {  // U+002A is '*'
-                    ++index;
-                    ++index;
                     skipMultiLineComment();
                 } else {
                     break;
@@ -503,17 +509,13 @@ parseStatement: true, parseSourceElement: true */
                 // U+003E is '>'
                 if ((source.charCodeAt(index + 1) === 0x2D) && (source.charCodeAt(index + 2) === 0x3E)) {
                     // '-->' is a single-line comment
-                    index += 3;
                     skipSingleLineComment(3);
                 } else {
                     break;
                 }
             } else if (ch === 0x3C) { // U+003C is '<'
                 if (source.slice(index + 1, index + 4) === '!--') {
-                    ++index; // `<`
-                    ++index; // `!`
-                    ++index; // `-`
-                    ++index; // `-`
+                    // '<!--' is a single-line comment
                     skipSingleLineComment(4);
                 } else {
                     break;
@@ -1177,8 +1179,6 @@ parseStatement: true, parseSourceElement: true */
     function scanRegExp() {
         var start, body, flags, pattern, value;
 
-        lookahead = null;
-        skipComment();
         start = index;
 
         body = scanRegExpBody();
@@ -1199,29 +1199,19 @@ parseStatement: true, parseSourceElement: true */
         return {
             literal: body.literal + flags.literal,
             value: value,
+            lineNumber: lineNumber,
+            lineStart: lineStart,
             start: start,
             end: index
         };
     }
 
     function collectRegex() {
-        var pos, loc, regex, token;
-
-        skipComment();
+        var pos, regex, token;
 
         pos = index;
-        loc = {
-            start: {
-                line: lineNumber,
-                column: index - lineStart
-            }
-        };
 
         regex = scanRegExp();
-        loc.end = {
-            line: lineNumber,
-            column: index - lineStart
-        };
 
         /* istanbul ignore next */
         if (!extra.tokenize) {
@@ -1239,7 +1229,16 @@ parseStatement: true, parseSourceElement: true */
                 type: 'RegularExpression',
                 value: regex.literal,
                 range: [pos, index],
-                loc: loc
+                loc: {
+                    start: {
+                        line: regex.lineNumber,
+                        column: regex.start - regex.lineStart
+                    },
+                    end: {
+                        line: lineNumber,
+                        column: index - lineStart
+                    }
+                }
             });
         }
 
@@ -1370,29 +1369,28 @@ parseStatement: true, parseSourceElement: true */
     }
 
     function collectToken() {
-        var loc, token, range, value;
-
-        skipComment();
-        loc = {
-            start: {
-                line: lineNumber,
-                column: index - lineStart
-            }
-        };
+        var token;
 
         token = advance();
-        loc.end = {
-            line: lineNumber,
-            column: index - lineStart
-        };
 
         if (token.type !== Token.EOF) {
-            value = source.slice(token.start, token.end);
             extra.tokens.push({
                 type: TokenName[token.type],
-                value: value,
+                value: source.slice(token.start, token.end),
                 range: [token.start, token.end],
-                loc: loc
+                loc: {
+                    start: token.type === Token.StringLiteral ? {
+                        line: token.startLineNumber,
+                        column: token.start - token.startLineStart
+                    } : {
+                        line: token.lineNumber,
+                        column: token.start - token.lineStart
+                    },
+                    end: {
+                        line: lineNumber,
+                        column: index - lineStart
+                    }
+                }
             });
         }
 
@@ -1414,18 +1412,6 @@ parseStatement: true, parseSourceElement: true */
         lineStart = token.lineStart;
 
         return token;
-    }
-
-    function peek() {
-        var pos, line, start;
-
-        pos = index;
-        line = lineNumber;
-        start = lineStart;
-        lookahead = (typeof extra.tokens !== 'undefined') ? collectToken() : advance();
-        index = pos;
-        lineNumber = line;
-        lineStart = start;
     }
 
     function Position() {
@@ -1490,8 +1476,6 @@ parseStatement: true, parseSourceElement: true */
             if (typeof this.type === 'undefined' || this.type === Syntax.Program) {
                 return;
             }
-
-            peek();
 
             if (extra.trailingComments.length > 0) {
                 if (extra.trailingComments[0].range[0] >= this.range[1]) {
@@ -1882,23 +1866,6 @@ parseStatement: true, parseSourceElement: true */
         }
     };
 
-    // Return true if there is a line terminator before the next token.
-
-    function peekLineTerminator() {
-        var pos, line, start, found;
-
-        pos = index;
-        line = lineNumber;
-        start = lineStart;
-        skipComment();
-        found = lineNumber !== line;
-        index = pos;
-        lineNumber = line;
-        lineStart = start;
-
-        return found;
-    }
-
     // Throw an exception
 
     function throwError(token, messageFormat) {
@@ -2030,17 +1997,14 @@ parseStatement: true, parseSourceElement: true */
     }
 
     function consumeSemicolon() {
-        var line;
-
         // Catch the very common case first: immediately a semicolon (U+003B).
         if (source.charCodeAt(index) === 0x3B) {
             lex();
             return;
         }
 
-        line = lineNumber;
-        skipComment();
-        if (lineNumber !== line) {
+        moveToLookaheadStart();
+        if (state.hasLineTerminator) {
             return;
         }
 
@@ -2279,12 +2243,12 @@ parseStatement: true, parseSourceElement: true */
             token.value = null;
             expr = node.finishLiteral(token);
         } else if (match('/') || match('/=')) {
-            if (typeof extra.tokens !== 'undefined') {
-                expr = node.finishLiteral(collectRegex());
-            } else {
-                expr = node.finishLiteral(scanRegExp());
-            }
-            peek();
+            token = (typeof extra.tokens !== 'undefined') ? collectRegex() : scanRegExp();
+            expr = node.finishLiteral(token);
+            lookahead = advance();
+            index = token.end;
+            lineNumber = token.lineNumber;
+            lineStart = token.lineStart;
         } else {
             throwUnexpected(lex());
         }
@@ -2414,7 +2378,7 @@ parseStatement: true, parseSourceElement: true */
         expr = parseLeftHandSideExpressionAllowCall();
 
         if (lookahead.type === Token.Punctuator) {
-            if ((match('++') || match('--')) && !peekLineTerminator()) {
+            if ((match('++') || match('--')) && !state.hasLineTerminator) {
                 // 11.3.1, 11.3.2
                 if (strict && expr.type === Syntax.Identifier && isRestrictedWord(expr.name)) {
                     throwErrorTolerant({}, Messages.StrictLHSPostfix);
@@ -3071,7 +3035,7 @@ parseStatement: true, parseSourceElement: true */
             return node.finishContinueStatement(null);
         }
 
-        if (peekLineTerminator()) {
+        if (state.hasLineTerminator) {
             if (!state.inIteration) {
                 throwError({}, Messages.IllegalContinue);
             }
@@ -3115,7 +3079,7 @@ parseStatement: true, parseSourceElement: true */
             return node.finishBreakStatement(null);
         }
 
-        if (peekLineTerminator()) {
+        if (state.hasLineTerminator) {
             if (!(state.inIteration || state.inSwitch)) {
                 throwError({}, Messages.IllegalBreak);
             }
@@ -3161,7 +3125,7 @@ parseStatement: true, parseSourceElement: true */
             }
         }
 
-        if (peekLineTerminator()) {
+        if (state.hasLineTerminator) {
             return node.finishReturnStatement(null);
         }
 
@@ -3183,7 +3147,7 @@ parseStatement: true, parseSourceElement: true */
 
         if (strict) {
             // TODO(ikarienator): Should we update the test cases instead?
-            skipComment();
+            moveToLookaheadStart();
             throwErrorTolerant({}, Messages.StrictModeWith);
         }
 
@@ -3277,7 +3241,7 @@ parseStatement: true, parseSourceElement: true */
 
         expectKeyword('throw');
 
-        if (peekLineTerminator()) {
+        if (state.hasLineTerminator) {
             throwError({}, Messages.NewlineAfterThrow);
         }
 
@@ -3704,8 +3668,6 @@ parseStatement: true, parseSourceElement: true */
     function parseProgram() {
         var body, node;
 
-        skipComment();
-        peek();
         node = new Node();
         strict = false;
 
@@ -3756,8 +3718,7 @@ parseStatement: true, parseSourceElement: true */
             labelSet: {},
             inFunctionBody: false,
             inIteration: false,
-            inSwitch: false,
-            lastCommentStart: -1
+            inSwitch: false
         };
 
         extra = {};
@@ -3784,12 +3745,9 @@ parseStatement: true, parseSourceElement: true */
         }
 
         try {
-            peek();
-            if (lookahead.type === Token.EOF) {
-                return extra.tokens;
-            }
+            lookahead = collectToken();
+            moveToLookaheadStart();
 
-            token = lex();
             while (lookahead.type !== Token.EOF) {
                 try {
                     token = lex();
@@ -3844,7 +3802,7 @@ parseStatement: true, parseSourceElement: true */
             inFunctionBody: false,
             inIteration: false,
             inSwitch: false,
-            lastCommentStart: -1
+            hasLineTerminator: false
         };
 
         extra = {};
@@ -3876,6 +3834,9 @@ parseStatement: true, parseSourceElement: true */
         }
 
         try {
+            lookahead = (typeof extra.tokens !== 'undefined') ? collectToken() : advance();
+            moveToLookaheadStart();
+
             program = parseProgram();
             if (typeof extra.comments !== 'undefined') {
                 program.comments = extra.comments;
