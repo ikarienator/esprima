@@ -73,6 +73,7 @@ parseStatement: true, parseSourceElement: true */
         index,
         lineNumber,
         lineStart,
+        currentPosition,
         length,
         delegate,
         lookahead,
@@ -344,16 +345,71 @@ parseStatement: true, parseSourceElement: true */
         }
     }
 
-    function moveToLookaheadStart() {
-        index = lookahead.start;
-        if (lookahead.type === Token.StringLiteral) {
-            lineNumber = lookahead.startLineNumber;
-            lineStart = lookahead.startLineStart;
-        } else {
-            lineNumber = lookahead.lineNumber;
-            lineStart = lookahead.lineStart;
-        }
+    function Position() {
+        this.line = lineNumber;
+        this.column = index - lineStart;
     }
+
+    function SourceLocation() {
+        this.start = currentPosition;
+        this.end = null;
+    }
+
+    function WorkingToken() {
+        if (extra.loc) {
+            this.loc = new SourceLocation();
+        }
+        this.start = index;
+
+        this.startLineNumber = lineNumber;
+        this.startLineStart = lineStart;
+    }
+
+    WorkingToken.prototype.finishToken = function (type, value) {
+        if (extra.loc) {
+            this.loc.end = currentPosition = new Position();
+        }
+        this.end = index;
+        this.type = type;
+        this.value = value;
+
+        // In case extra.loc is false and we need to throw an exception.
+        this.lineNumber = lineNumber;
+        this.lineStart = lineStart;
+
+        return this;
+    };
+
+    WorkingToken.prototype.output = function () {
+        var result = {};
+        result.type = TokenName[this.type];
+        result.value = source.slice(this.start, this.end);
+        if (extra.range) {
+            result.range = [this.start, this.end];
+        }
+        if (extra.loc) {
+            result.loc = this.loc;
+        }
+        return result;
+    };
+
+    WorkingToken.prototype.moveToStart = function () {
+        index = this.start;
+        if (extra.loc) {
+            currentPosition = this.loc.start;
+        }
+        lineNumber = this.startLineNumber;
+        lineStart = this.startLineStart;
+    };
+
+    WorkingToken.prototype.moveToEnd = function () {
+        index = this.end;
+        if (extra.loc) {
+            currentPosition = this.loc.end;
+        }
+        lineNumber = this.lineNumber;
+        lineStart = this.lineStart;
+    };
 
     // 7.4 Comments
 
@@ -450,7 +506,7 @@ parseStatement: true, parseSourceElement: true */
                 ++index;
                 lineStart = index;
                 if (index >= length) {
-                    throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+                    throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
                 }
             } else if (ch === 0x2A) {
                 // Block comment ends with '*/'.
@@ -473,11 +529,11 @@ parseStatement: true, parseSourceElement: true */
             }
         }
 
-        throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+        throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
     }
 
     function skipComment() {
-        var ch, start;
+        var ch, start, startIndex = index;
 
         start = (index === 0);
         state.hasLineTerminator = false;
@@ -524,6 +580,10 @@ parseStatement: true, parseSourceElement: true */
                 break;
             }
         }
+
+        if (startIndex !== index && extra.loc) {
+            currentPosition = new Position();
+        }
     }
 
     function scanHexEscape(prefix) {
@@ -549,7 +609,7 @@ parseStatement: true, parseSourceElement: true */
 
         // At least, one hex digit is required.
         if (ch === '}') {
-            throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+            throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
         }
 
         while (index < length) {
@@ -561,7 +621,7 @@ parseStatement: true, parseSourceElement: true */
         }
 
         if (code > 0x10FFFF || ch !== '}') {
-            throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+            throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
         }
 
         // UTF-16 Encoding
@@ -582,12 +642,12 @@ parseStatement: true, parseSourceElement: true */
         // '\u' (U+005C, U+0075) denotes an escaped character.
         if (ch === 0x5C) {
             if (source.charCodeAt(index) !== 0x75) {
-                throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+                throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
             }
             ++index;
             ch = scanHexEscape('u');
             if (!ch || ch === '\\' || !isIdentifierStart(ch.charCodeAt(0))) {
-                throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+                throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
             }
             id = ch;
         }
@@ -604,12 +664,12 @@ parseStatement: true, parseSourceElement: true */
             if (ch === 0x5C) {
                 id = id.substr(0, id.length - 1);
                 if (source.charCodeAt(index) !== 0x75) {
-                    throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+                    throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
                 }
                 ++index;
                 ch = scanHexEscape('u');
                 if (!ch || ch === '\\' || !isIdentifierPart(ch.charCodeAt(0))) {
-                    throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+                    throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
                 }
                 id += ch;
             }
@@ -640,7 +700,7 @@ parseStatement: true, parseSourceElement: true */
     }
 
     function scanIdentifier() {
-        var start, id, type;
+        var start, id, type, token = new WorkingToken();
 
         start = index;
 
@@ -666,14 +726,7 @@ parseStatement: true, parseSourceElement: true */
             type = Token.Identifier;
         }
 
-        return {
-            type: type,
-            value: id,
-            lineNumber: lineNumber,
-            lineStart: lineStart,
-            start: start,
-            end: index
-        };
+        return token.finishToken(type, id);
     }
 
 
@@ -686,7 +739,8 @@ parseStatement: true, parseSourceElement: true */
             ch1 = source[index],
             ch2,
             ch3,
-            ch4;
+            ch4,
+            token = new WorkingToken();
 
         switch (code) {
 
@@ -711,14 +765,7 @@ parseStatement: true, parseSourceElement: true */
                     extra.openCurlyToken = extra.tokens.length;
                 }
             }
-            return {
-                type: Token.Punctuator,
-                value: String.fromCharCode(code),
-                lineNumber: lineNumber,
-                lineStart: lineStart,
-                start: start,
-                end: index
-            };
+            return token.finishToken(Token.Punctuator, String.fromCharCode(code));
 
         default:
             code2 = source.charCodeAt(index + 1);
@@ -737,14 +784,7 @@ parseStatement: true, parseSourceElement: true */
                 case 0x26:  // &
                 case 0x2A:  // *
                     index += 2;
-                    return {
-                        type: Token.Punctuator,
-                        value: String.fromCharCode(code) + String.fromCharCode(code2),
-                        lineNumber: lineNumber,
-                        lineStart: lineStart,
-                        start: start,
-                        end: index
-                    };
+                    return token.finishToken(Token.Punctuator, String.fromCharCode(code) + String.fromCharCode(code2));
 
                 case 0x21: // !
                 case 0x3D: // =
@@ -754,14 +794,7 @@ parseStatement: true, parseSourceElement: true */
                     if (source.charCodeAt(index) === 0x3D) {
                         ++index;
                     }
-                    return {
-                        type: Token.Punctuator,
-                        value: source.slice(start, index),
-                        lineNumber: lineNumber,
-                        lineStart: lineStart,
-                        start: start,
-                        end: index
-                    };
+                    return token.finishToken(Token.Punctuator, source.slice(start, index));
                 }
             }
         }
@@ -772,14 +805,7 @@ parseStatement: true, parseSourceElement: true */
 
         if (ch4 === '>>>=') {
             index += 4;
-            return {
-                type: Token.Punctuator,
-                value: ch4,
-                lineNumber: lineNumber,
-                lineStart: lineStart,
-                start: start,
-                end: index
-            };
+            return token.finishToken(Token.Punctuator, ch4);
         }
 
         // 3-character punctuators: === !== >>> <<= >>=
@@ -788,14 +814,7 @@ parseStatement: true, parseSourceElement: true */
 
         if (ch3 === '>>>' || ch3 === '<<=' || ch3 === '>>=') {
             index += 3;
-            return {
-                type: Token.Punctuator,
-                value: ch3,
-                lineNumber: lineNumber,
-                lineStart: lineStart,
-                start: start,
-                end: index
-            };
+            return token.finishToken(Token.Punctuator, ch3);
         }
 
         // Other 2-character punctuators: ++ -- << >> && ||
@@ -803,36 +822,22 @@ parseStatement: true, parseSourceElement: true */
 
         if ((ch1 === ch2[1] && ('+-<>&|'.indexOf(ch1) >= 0)) || ch2 === '=>') {
             index += 2;
-            return {
-                type: Token.Punctuator,
-                value: ch2,
-                lineNumber: lineNumber,
-                lineStart: lineStart,
-                start: start,
-                end: index
-            };
+            return token.finishToken(Token.Punctuator, ch2);
         }
 
         // 1-character punctuators: < > = ! + - * % & | ^ /
 
         if ('<>=!+-*%&|^/'.indexOf(ch1) >= 0) {
             ++index;
-            return {
-                type: Token.Punctuator,
-                value: ch1,
-                lineNumber: lineNumber,
-                lineStart: lineStart,
-                start: start,
-                end: index
-            };
+            return token.finishToken(Token.Punctuator, ch1);
         }
 
-        throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+        throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
     }
 
     // 7.8.3 Numeric Literals
 
-    function scanHexLiteral(start) {
+    function scanHexLiteral(start, token) {
         var number = '';
 
         while (index < length) {
@@ -843,24 +848,17 @@ parseStatement: true, parseSourceElement: true */
         }
 
         if (number.length === 0) {
-            throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+            throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
         }
 
         if (isIdentifierStart(source.charCodeAt(index))) {
-            throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+            throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
         }
 
-        return {
-            type: Token.NumericLiteral,
-            value: parseInt('0x' + number, 16),
-            lineNumber: lineNumber,
-            lineStart: lineStart,
-            start: start,
-            end: index
-        };
+        return token.finishToken(Token.NumericLiteral, parseInt('0x' + number, 16));
     }
 
-    function scanOctalLiteral(start) {
+    function scanOctalLiteral(start, token) {
         var number = '0' + source[index++];
         while (index < length) {
             if (!isOctalDigit(source[index])) {
@@ -870,22 +868,14 @@ parseStatement: true, parseSourceElement: true */
         }
 
         if (isIdentifierStart(source.charCodeAt(index)) || isDecimalDigit(source.charCodeAt(index))) {
-            throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+            throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
         }
-
-        return {
-            type: Token.NumericLiteral,
-            value: parseInt(number, 8),
-            octal: true,
-            lineNumber: lineNumber,
-            lineStart: lineStart,
-            start: start,
-            end: index
-        };
+        token.octal = true;
+        return token.finishToken(Token.NumericLiteral, parseInt(number, 8));
     }
 
     function scanNumericLiteral() {
-        var number, start, ch;
+        var number, start, ch, token = new WorkingToken();
 
         ch = source[index];
         assert(isDecimalDigit(ch.charCodeAt(0)) || (ch === '.'),
@@ -902,15 +892,15 @@ parseStatement: true, parseSourceElement: true */
             if (number === '0') {
                 if (ch === 'x' || ch === 'X') {
                     ++index;
-                    return scanHexLiteral(start);
+                    return scanHexLiteral(start, token);
                 }
                 if (isOctalDigit(ch)) {
-                    return scanOctalLiteral(start);
+                    return scanOctalLiteral(start, token);
                 }
 
                 // decimal number starts with '0' such as '09' is illegal.
                 if (ch && isDecimalDigit(ch.charCodeAt(0))) {
-                    throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+                    throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
                 }
             }
 
@@ -940,30 +930,21 @@ parseStatement: true, parseSourceElement: true */
                     number += source[index++];
                 }
             } else {
-                throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+                throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
             }
         }
 
         if (isIdentifierStart(source.charCodeAt(index))) {
-            throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+            throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
         }
 
-        return {
-            type: Token.NumericLiteral,
-            value: parseFloat(number),
-            lineNumber: lineNumber,
-            lineStart: lineStart,
-            start: start,
-            end: index
-        };
+        return token.finishToken(Token.NumericLiteral, parseFloat(number));
     }
 
     // 7.8.4 String Literals
 
     function scanStringLiteral() {
-        var str = '', quote, start, ch, code, unescaped, restore, octal = false, startLineNumber, startLineStart;
-        startLineNumber = lineNumber;
-        startLineStart = lineStart;
+        var str = '', quote, start, ch, code, unescaped, restore, octal = false, token = new WorkingToken();
 
         quote = source[index];
         assert((quote === '\'' || quote === '"'),
@@ -1059,20 +1040,11 @@ parseStatement: true, parseSourceElement: true */
         }
 
         if (quote !== '') {
-            throwError({}, Messages.UnexpectedToken, 'ILLEGAL');
+            throwError(null, Messages.UnexpectedToken, 'ILLEGAL');
         }
 
-        return {
-            type: Token.StringLiteral,
-            value: str,
-            octal: octal,
-            startLineNumber: startLineNumber,
-            startLineStart: startLineStart,
-            lineNumber: lineNumber,
-            lineStart: lineStart,
-            start: start,
-            end: index
-        };
+        token.octal = octal;
+        return token.finishToken(Token.StringLiteral, str);
     }
 
     function testRegExp(pattern, flags) {
@@ -1080,7 +1052,7 @@ parseStatement: true, parseSourceElement: true */
         try {
             value = new RegExp(pattern, flags);
         } catch (e) {
-            throwError({}, Messages.InvalidRegExp);
+            throwError(null, Messages.InvalidRegExp);
         }
         return value;
     }
@@ -1101,11 +1073,11 @@ parseStatement: true, parseSourceElement: true */
                 ch = source[index++];
                 // ECMA-262 7.8.5
                 if (isLineTerminator(ch.charCodeAt(0))) {
-                    throwError({}, Messages.UnterminatedRegExp);
+                    throwError(null, Messages.UnterminatedRegExp);
                 }
                 str += ch;
             } else if (isLineTerminator(ch.charCodeAt(0))) {
-                throwError({}, Messages.UnterminatedRegExp);
+                throwError(null, Messages.UnterminatedRegExp);
             } else if (classMarker) {
                 if (ch === ']') {
                     classMarker = false;
@@ -1121,7 +1093,7 @@ parseStatement: true, parseSourceElement: true */
         }
 
         if (!terminated) {
-            throwError({}, Messages.UnterminatedRegExp);
+            throwError(null, Messages.UnterminatedRegExp);
         }
 
         // Exclude leading and trailing slash.
@@ -1160,7 +1132,7 @@ parseStatement: true, parseSourceElement: true */
                         flags += 'u';
                         str += '\\u';
                     }
-                    throwErrorTolerant({}, Messages.UnexpectedToken, 'ILLEGAL');
+                    throwErrorTolerant(null, Messages.UnexpectedToken, 'ILLEGAL');
                 } else {
                     str += '\\';
                 }
@@ -1177,71 +1149,18 @@ parseStatement: true, parseSourceElement: true */
     }
 
     function scanRegExp() {
-        var start, body, flags, pattern, value;
-
-        start = index;
+        var body, flags, value, token = new WorkingToken();
 
         body = scanRegExpBody();
         flags = scanRegExpFlags();
         value = testRegExp(body.value, flags.value);
 
-        if (extra.tokenize) {
-            return {
-                type: Token.RegularExpression,
-                value: value,
-                lineNumber: lineNumber,
-                lineStart: lineStart,
-                start: start,
-                end: index
-            };
-        }
-
-        return {
-            literal: body.literal + flags.literal,
-            value: value,
-            lineNumber: lineNumber,
-            lineStart: lineStart,
-            start: start,
-            end: index
-        };
+        return token.finishToken(Token.RegularExpression, value);
     }
 
-    function collectRegex() {
-        var pos, regex, token;
-
-        pos = index;
-
-        regex = scanRegExp();
-
-        /* istanbul ignore next */
-        if (!extra.tokenize) {
-            // Pop the previous token, which is likely '/' or '/='
-            if (extra.tokens.length > 0) {
-                token = extra.tokens[extra.tokens.length - 1];
-                if (token.range[0] === pos && token.type === 'Punctuator') {
-                    if (token.value === '/' || token.value === '/=') {
-                        extra.tokens.pop();
-                    }
-                }
-            }
-
-            extra.tokens.push({
-                type: 'RegularExpression',
-                value: regex.literal,
-                range: [pos, index],
-                loc: {
-                    start: {
-                        line: regex.lineNumber,
-                        column: regex.start - regex.lineStart
-                    },
-                    end: {
-                        line: lineNumber,
-                        column: index - lineStart
-                    }
-                }
-            });
-        }
-
+    function rescanRegExp() {
+        var regex = scanRegExp();
+        extra.tokens[extra.tokens.length - 1] = regex.output();
         return regex;
     }
 
@@ -1260,7 +1179,7 @@ parseStatement: true, parseSourceElement: true */
         prevToken = extra.tokens[extra.tokens.length - 1];
         if (!prevToken) {
             // Nothing before that: it cannot be a division.
-            return collectRegex();
+            return scanRegExp();
         }
         if (prevToken.type === 'Punctuator') {
             if (prevToken.value === ']') {
@@ -1274,7 +1193,7 @@ parseStatement: true, parseSourceElement: true */
                          checkToken.value === 'while' ||
                          checkToken.value === 'for' ||
                          checkToken.value === 'with')) {
-                    return collectRegex();
+                    return scanRegExp();
                 }
                 return scanPunctuator();
             }
@@ -1293,7 +1212,7 @@ parseStatement: true, parseSourceElement: true */
                     // Named function.
                     checkToken = extra.tokens[extra.openCurlyToken - 5];
                     if (!checkToken) {
-                        return collectRegex();
+                        return scanRegExp();
                     }
                 } else {
                     return scanPunctuator();
@@ -1305,29 +1224,23 @@ parseStatement: true, parseSourceElement: true */
                     return scanPunctuator();
                 }
                 // It is a declaration.
-                return collectRegex();
+                return scanRegExp();
             }
-            return collectRegex();
+            return scanRegExp();
         }
         if (prevToken.type === 'Keyword') {
-            return collectRegex();
+            return scanRegExp();
         }
         return scanPunctuator();
     }
 
     function advance() {
-        var ch;
+        var ch, token;
 
         skipComment();
 
         if (index >= length) {
-            return {
-                type: Token.EOF,
-                lineNumber: lineNumber,
-                lineStart: lineStart,
-                start: index,
-                end: index
-            };
+            return new WorkingToken().finishToken(Token.EOF, null);
         }
 
         ch = source.charCodeAt(index);
@@ -1373,82 +1286,30 @@ parseStatement: true, parseSourceElement: true */
 
         token = advance();
 
-        if (token.type !== Token.EOF) {
-            extra.tokens.push({
-                type: TokenName[token.type],
-                value: source.slice(token.start, token.end),
-                range: [token.start, token.end],
-                loc: {
-                    start: token.type === Token.StringLiteral ? {
-                        line: token.startLineNumber,
-                        column: token.start - token.startLineStart
-                    } : {
-                        line: token.lineNumber,
-                        column: token.start - token.lineStart
-                    },
-                    end: {
-                        line: lineNumber,
-                        column: index - lineStart
-                    }
-                }
-            });
+        if (typeof extra.tokens !== 'undefined' && token.type !== Token.EOF) {
+            extra.tokens.push(token.output());
         }
 
         return token;
     }
 
     function lex() {
-        var token;
-
-        token = lookahead;
-        index = token.end;
-        lineNumber = token.lineNumber;
-        lineStart = token.lineStart;
-
+        var token = lookahead;
+        token.moveToEnd();
         lookahead = (typeof extra.tokens !== 'undefined') ? collectToken() : advance();
-
-        index = token.end;
-        lineNumber = token.lineNumber;
-        lineStart = token.lineStart;
-
+        token.moveToEnd();
         return token;
     }
 
-    function Position() {
-        this.line = lineNumber;
-        this.column = index - lineStart;
-    }
-
-    function SourceLocation() {
-        this.start = new Position();
-        this.end = null;
-    }
-
     function WrappingSourceLocation(startToken) {
-        if (startToken.type === Token.StringLiteral) {
-            this.start = {
-                line: startToken.startLineNumber,
-                column: startToken.start - startToken.startLineStart
-            };
-        } else {
-            this.start = {
-                line: startToken.lineNumber,
-                column: startToken.start - startToken.lineStart
-            };
-        }
+        this.start = startToken.loc.start;
         this.end = null;
     }
 
     function Node() {
         // Skip comment.
-        index = lookahead.start;
-        if (lookahead.type === Token.StringLiteral) {
-            lineNumber = lookahead.startLineNumber;
-            lineStart = lookahead.startLineStart;
-        } else {
-            lineNumber = lookahead.lineNumber;
-            lineStart = lookahead.lineStart;
-        }
+        lookahead.moveToStart();
+
         if (extra.range) {
             this.range = [index, 0];
         }
@@ -1522,7 +1383,7 @@ parseStatement: true, parseSourceElement: true */
                 this.range[1] = index;
             }
             if (extra.loc) {
-                this.loc.end = new Position();
+                this.loc.end = currentPosition;
                 if (extra.source) {
                     this.loc.source = extra.source;
                 }
@@ -1879,11 +1740,11 @@ parseStatement: true, parseSourceElement: true */
                 }
             );
 
-        if (typeof token.lineNumber === 'number') {
+        if (token) {
             error = new Error('Line ' + token.lineNumber + ': ' + msg);
             error.index = token.start;
             error.lineNumber = token.lineNumber;
-            error.column = token.start - lineStart + 1;
+            error.column = token.start - token.lineStart + 1;
         } else {
             error = new Error('Line ' + lineNumber + ': ' + msg);
             error.index = index;
@@ -2003,7 +1864,8 @@ parseStatement: true, parseSourceElement: true */
             return;
         }
 
-        moveToLookaheadStart();
+        lookahead.moveToStart();
+
         if (state.hasLineTerminator) {
             return;
         }
@@ -2147,15 +2009,15 @@ parseStatement: true, parseSourceElement: true */
             if (Object.prototype.hasOwnProperty.call(map, key)) {
                 if (map[key] === PropertyKind.Data) {
                     if (strict && kind === PropertyKind.Data) {
-                        throwErrorTolerant({}, Messages.StrictDuplicateProperty);
+                        throwErrorTolerant(null, Messages.StrictDuplicateProperty);
                     } else if (kind !== PropertyKind.Data) {
-                        throwErrorTolerant({}, Messages.AccessorDataProperty);
+                        throwErrorTolerant(null, Messages.AccessorDataProperty);
                     }
                 } else {
                     if (kind === PropertyKind.Data) {
-                        throwErrorTolerant({}, Messages.AccessorDataProperty);
+                        throwErrorTolerant(null, Messages.AccessorDataProperty);
                     } else if (map[key] & kind) {
-                        throwErrorTolerant({}, Messages.AccessorGetSet);
+                        throwErrorTolerant(null, Messages.AccessorGetSet);
                     }
                 }
                 map[key] |= kind;
@@ -2243,12 +2105,11 @@ parseStatement: true, parseSourceElement: true */
             token.value = null;
             expr = node.finishLiteral(token);
         } else if (match('/') || match('/=')) {
-            token = (typeof extra.tokens !== 'undefined') ? collectRegex() : scanRegExp();
+            lookahead.moveToStart();
+            token = (typeof extra.tokens !== 'undefined') ? rescanRegExp() : scanRegExp();
             expr = node.finishLiteral(token);
-            lookahead = advance();
-            index = token.end;
-            lineNumber = token.lineNumber;
-            lineStart = token.lineStart;
+            lookahead = (typeof extra.tokens !== 'undefined') ? collectToken() : advance();
+            token.moveToEnd();
         } else {
             throwUnexpected(lex());
         }
@@ -2381,11 +2242,11 @@ parseStatement: true, parseSourceElement: true */
             if ((match('++') || match('--')) && !state.hasLineTerminator) {
                 // 11.3.1, 11.3.2
                 if (strict && expr.type === Syntax.Identifier && isRestrictedWord(expr.name)) {
-                    throwErrorTolerant({}, Messages.StrictLHSPostfix);
+                    throwErrorTolerant(null, Messages.StrictLHSPostfix);
                 }
 
                 if (!isLeftHandSide(expr)) {
-                    throwErrorTolerant({}, Messages.InvalidLHSInAssignment);
+                    throwErrorTolerant(null, Messages.InvalidLHSInAssignment);
                 }
 
                 token = lex();
@@ -2409,11 +2270,11 @@ parseStatement: true, parseSourceElement: true */
             expr = parseUnaryExpression();
             // 11.4.4, 11.4.5
             if (strict && expr.type === Syntax.Identifier && isRestrictedWord(expr.name)) {
-                throwErrorTolerant({}, Messages.StrictLHSPrefix);
+                throwErrorTolerant(null, Messages.StrictLHSPrefix);
             }
 
             if (!isLeftHandSide(expr)) {
-                throwErrorTolerant({}, Messages.InvalidLHSInAssignment);
+                throwErrorTolerant(null, Messages.InvalidLHSInAssignment);
             }
 
             expr = new WrappingNode(startToken).finishUnaryExpression(token.value, expr);
@@ -2428,7 +2289,7 @@ parseStatement: true, parseSourceElement: true */
             expr = parseUnaryExpression();
             expr = new WrappingNode(startToken).finishUnaryExpression(token.value, expr);
             if (strict && expr.operator === 'delete' && expr.argument.type === Syntax.Identifier) {
-                throwErrorTolerant({}, Messages.StrictDelete);
+                throwErrorTolerant(null, Messages.StrictDelete);
             }
         } else {
             expr = parsePostfixExpression();
@@ -2629,10 +2490,7 @@ parseStatement: true, parseSourceElement: true */
         }
 
         if (options.message === Messages.StrictParamDupe) {
-            throwError(
-                strict ? options.stricted : options.firstRestricted,
-                options.message
-            );
+            throwError(null, options.message);
         }
 
         return {
@@ -2654,10 +2512,10 @@ parseStatement: true, parseSourceElement: true */
         body = parseConciseBody();
 
         if (strict && options.firstRestricted) {
-            throwError(options.firstRestricted, options.message);
+            throwError(null, options.message);
         }
         if (strict && options.stricted) {
-            throwErrorTolerant(options.stricted, options.message);
+            throwErrorTolerant(null, options.message);
         }
 
         strict = previousStrict;
@@ -2696,7 +2554,7 @@ parseStatement: true, parseSourceElement: true */
         if (matchAssign()) {
             // LeftHandSideExpression
             if (!isLeftHandSide(expr)) {
-                throwErrorTolerant({}, Messages.InvalidLHSInAssignment);
+                throwErrorTolerant(null, Messages.InvalidLHSInAssignment);
             }
 
             // 11.13.1
@@ -2789,7 +2647,7 @@ parseStatement: true, parseSourceElement: true */
 
         // 12.2.1
         if (strict && isRestrictedWord(id.name)) {
-            throwErrorTolerant({}, Messages.StrictVarName);
+            throwErrorTolerant(null, Messages.StrictVarName);
         }
 
         if (kind === 'const') {
@@ -2976,7 +2834,7 @@ parseStatement: true, parseSourceElement: true */
                 if (matchKeyword('in')) {
                     // LeftHandSideExpression
                     if (!isLeftHandSide(init)) {
-                        throwErrorTolerant({}, Messages.InvalidLHSInForIn);
+                        throwErrorTolerant(null, Messages.InvalidLHSInForIn);
                     }
 
                     lex();
@@ -3029,7 +2887,7 @@ parseStatement: true, parseSourceElement: true */
             lex();
 
             if (!state.inIteration) {
-                throwError({}, Messages.IllegalContinue);
+                throwError(null, Messages.IllegalContinue);
             }
 
             return node.finishContinueStatement(null);
@@ -3037,7 +2895,7 @@ parseStatement: true, parseSourceElement: true */
 
         if (state.hasLineTerminator) {
             if (!state.inIteration) {
-                throwError({}, Messages.IllegalContinue);
+                throwError(null, Messages.IllegalContinue);
             }
 
             return node.finishContinueStatement(null);
@@ -3048,14 +2906,14 @@ parseStatement: true, parseSourceElement: true */
 
             key = '$' + label.name;
             if (!Object.prototype.hasOwnProperty.call(state.labelSet, key)) {
-                throwError({}, Messages.UnknownLabel, label.name);
+                throwError(null, Messages.UnknownLabel, label.name);
             }
         }
 
         consumeSemicolon();
 
         if (label === null && !state.inIteration) {
-            throwError({}, Messages.IllegalContinue);
+            throwError(null, Messages.IllegalContinue);
         }
 
         return node.finishContinueStatement(label);
@@ -3073,7 +2931,7 @@ parseStatement: true, parseSourceElement: true */
             lex();
 
             if (!(state.inIteration || state.inSwitch)) {
-                throwError({}, Messages.IllegalBreak);
+                throwError(null, Messages.IllegalBreak);
             }
 
             return node.finishBreakStatement(null);
@@ -3081,7 +2939,7 @@ parseStatement: true, parseSourceElement: true */
 
         if (state.hasLineTerminator) {
             if (!(state.inIteration || state.inSwitch)) {
-                throwError({}, Messages.IllegalBreak);
+                throwError(null, Messages.IllegalBreak);
             }
 
             return node.finishBreakStatement(null);
@@ -3092,14 +2950,14 @@ parseStatement: true, parseSourceElement: true */
 
             key = '$' + label.name;
             if (!Object.prototype.hasOwnProperty.call(state.labelSet, key)) {
-                throwError({}, Messages.UnknownLabel, label.name);
+                throwError(null, Messages.UnknownLabel, label.name);
             }
         }
 
         consumeSemicolon();
 
         if (label === null && !(state.inIteration || state.inSwitch)) {
-            throwError({}, Messages.IllegalBreak);
+            throwError(null, Messages.IllegalBreak);
         }
 
         return node.finishBreakStatement(label);
@@ -3113,7 +2971,7 @@ parseStatement: true, parseSourceElement: true */
         expectKeyword('return');
 
         if (!state.inFunctionBody) {
-            throwErrorTolerant({}, Messages.IllegalReturn);
+            throwErrorTolerant(null, Messages.IllegalReturn);
         }
 
         // 'return' followed by a space and an identifier is very common.
@@ -3147,8 +3005,8 @@ parseStatement: true, parseSourceElement: true */
 
         if (strict) {
             // TODO(ikarienator): Should we update the test cases instead?
-            moveToLookaheadStart();
-            throwErrorTolerant({}, Messages.StrictModeWith);
+            lookahead.moveToStart();
+            throwErrorTolerant(null, Messages.StrictModeWith);
         }
 
         expectKeyword('with');
@@ -3220,7 +3078,7 @@ parseStatement: true, parseSourceElement: true */
             clause = parseSwitchCase();
             if (clause.test === null) {
                 if (defaultFound) {
-                    throwError({}, Messages.MultipleDefaultsInSwitch);
+                    throwError(null, Messages.MultipleDefaultsInSwitch);
                 }
                 defaultFound = true;
             }
@@ -3242,7 +3100,7 @@ parseStatement: true, parseSourceElement: true */
         expectKeyword('throw');
 
         if (state.hasLineTerminator) {
-            throwError({}, Messages.NewlineAfterThrow);
+            throwError(null, Messages.NewlineAfterThrow);
         }
 
         argument = parseExpression();
@@ -3267,7 +3125,7 @@ parseStatement: true, parseSourceElement: true */
         param = parseVariableIdentifier();
         // 12.14.1
         if (strict && isRestrictedWord(param.name)) {
-            throwErrorTolerant({}, Messages.StrictCatchVariable);
+            throwErrorTolerant(null, Messages.StrictCatchVariable);
         }
 
         expect(')');
@@ -3292,7 +3150,7 @@ parseStatement: true, parseSourceElement: true */
         }
 
         if (handlers.length === 0 && !finalizer) {
-            throwError({}, Messages.NoCatchOrFinally);
+            throwError(null, Messages.NoCatchOrFinally);
         }
 
         return node.finishTryStatement(block, [], handlers, finalizer);
@@ -3379,7 +3237,7 @@ parseStatement: true, parseSourceElement: true */
 
             key = '$' + expr.name;
             if (Object.prototype.hasOwnProperty.call(state.labelSet, key)) {
-                throwError({}, Messages.Redeclaration, 'Label', expr.name);
+                throwError(null, Messages.Redeclaration, 'Label', expr.name);
             }
 
             state.labelSet[key] = true;
@@ -3736,6 +3594,9 @@ parseStatement: true, parseSourceElement: true */
 
         extra.range = (typeof options.range === 'boolean') && options.range;
         extra.loc = (typeof options.loc === 'boolean') && options.loc;
+        if (extra.loc) {
+            currentPosition = new Position();
+        }
 
         if (typeof options.comment === 'boolean' && options.comment) {
             extra.comments = [];
@@ -3746,7 +3607,7 @@ parseStatement: true, parseSourceElement: true */
 
         try {
             lookahead = collectToken();
-            moveToLookaheadStart();
+            lookahead.moveToStart();
 
             while (lookahead.type !== Token.EOF) {
                 try {
@@ -3809,6 +3670,9 @@ parseStatement: true, parseSourceElement: true */
         if (typeof options !== 'undefined') {
             extra.range = (typeof options.range === 'boolean') && options.range;
             extra.loc = (typeof options.loc === 'boolean') && options.loc;
+            if (extra.loc) {
+                currentPosition = new Position();
+            }
             extra.attachComment = (typeof options.attachComment === 'boolean') && options.attachComment;
 
             if (extra.loc && options.source !== null && options.source !== undefined) {
@@ -3835,7 +3699,7 @@ parseStatement: true, parseSourceElement: true */
 
         try {
             lookahead = (typeof extra.tokens !== 'undefined') ? collectToken() : advance();
-            moveToLookaheadStart();
+            lookahead.moveToStart();
 
             program = parseProgram();
             if (typeof extra.comments !== 'undefined') {
