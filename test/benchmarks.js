@@ -329,6 +329,10 @@ if (typeof window !== 'undefined') {
                         if (typeof gc === 'function') {
                             gc();
                         }
+                        tree = [];
+                        if (typeof gc === 'function') {
+                            gc();
+                        }
                         var result = pad(this.name, 20);
                         result += pad(kb(size) + ' KiB', 12);
                         result += pad((1000 * this.stats.mean).toFixed(2), 10);
